@@ -1,0 +1,249 @@
+Portfolio Analysis SOP v3 
+
+Author: Strategic Planning Team 
+
+Last updated: 2026-01-09 
+
+Purpose: This SOP is the single source of truth for the agent to produce a full portfolio analysis workbook, 10-year monthly forecast, and residual-based valuation. It includes IO contract, method steps, QA gates, error handling, and backend action schema. 
+
+ 
+
+Quick Summary for Copilot Studio 
+
+This SOP defines: 
+
+Inputs: Portfolio CSV and MCC mapping CSV. 
+
+Outputs: Excel workbook with all analysis tabs and charts. 
+
+Method: Data prep, attrition, Shapley bridge, seasonality, MCC concentration, forecast with rebasing and drift, residual valuation, sensitivity matrix, summary, charts. 
+
+QA: Rebasing confirmed, drift applied monthly, correct formats, charts embedded. 
+
+Action interface: JSON request and response schema. 
+
+ 
+
+Enhancements for Copilot Studio Integration 
+
+OpenAPI Spec Snippet for Action 
+
+1     openapi: 3.0.0 
+
+2     info: 
+
+3       title: Portfolio Analysis API 
+
+4       version: 1.0.0 
+
+5     paths: 
+
+6       /run_portfolio_pipeline: 
+
+7         post: 
+
+8           summary: Execute portfolio analysis pipeline 
+
+9           requestBody: 
+
+10             required: true 
+
+11             content: 
+
+12               application/json: 
+
+13                 schema: 
+
+14                   $ref: '#/components/schemas/PortfolioRequest' 
+
+15           responses: 
+
+16             '200': 
+
+17               description: Successful response 
+
+18               content: 
+
+19                 application/json: 
+
+20                   schema: 
+
+21                     $ref: '#/components/schemas/PortfolioResponse' 
+
+22     components: 
+
+23       schemas: 
+
+24         PortfolioRequest: 
+
+25           type: object 
+
+26           properties: 
+
+27             portfolio_csv_path: 
+
+28               type: string 
+
+29             mcc_csv_path: 
+
+30               type: string 
+
+31             portfolio_name: 
+
+32               type: string 
+
+33             forecast_horizon_years: 
+
+34               type: integer 
+
+35             drift_per_year: 
+
+36               type: number 
+
+37             yoy_lookback_months: 
+
+38               type: integer 
+
+39             topN_MCC: 
+
+40               type: integer 
+
+41             base_discount_rate_annual: 
+
+42               type: number 
+
+43             sensitivity_discount_rates_annual: 
+
+44               type: array 
+
+45               items: 
+
+46                 type: number 
+
+47             sensitivity_yoy_offsets: 
+
+48               type: array 
+
+49               items: 
+
+50                 type: number 
+
+51             include_unexplained_delta_in_driver: 
+
+52               type: boolean 
+
+53             residual_display_positive: 
+
+54               type: boolean 
+
+55             currency_format: 
+
+56               type: string 
+
+57             percent_format: 
+
+58               type: string 
+
+59         PortfolioResponse: 
+
+60           type: object 
+
+61           properties: 
+
+62             workbook_link: 
+
+63               type: string 
+
+64             base_yoy_decline: 
+
+65               type: number 
+
+66             residual_rate: 
+
+67               type: number 
+
+68             pv_residual_base: 
+
+69               type: number 
+
+70      
+
+ 
+
+Example Trigger Prompt 
+
+1     Run the full analysis with: 
+
+2     portfolio_csv_path="Bruber_full_portfolio.csv", 
+
+3     mcc_csv_path="MCC breakdown Bruber.csv", 
+
+4     portfolio_name="Bruber", 
+
+5     forecast_horizon_years=10, 
+
+6     drift_per_year=-0.005, 
+
+7     yoy_lookback_months=12, 
+
+8     topN_MCC=10, 
+
+9     base_discount_rate_annual=0.15, 
+
+10     sensitivity_discount_rates_annual=[0.10,0.11,0.12,0.13,0.14,0.15], 
+
+11     sensitivity_yoy_offsets=[-0.025,-0.020,-0.015,-0.010,-0.005,0.0,0.005,0.010,0.015,0.020,0.025], 
+
+12     include_unexplained_delta_in_driver=false, 
+
+13     residual_display_positive=true, 
+
+14     currency_format="$#,##0", 
+
+15     percent_format="0.0%". 
+
+16     Return workbook link, Base YoY decline, Residual rate, and PV of residual CF. 
+
+17      
+
+ 
+
+Expected Outputs 
+
+Workbook link (OneDrive/SharePoint URL) 
+
+Base YoY decline (decimal) 
+
+Residual rate (decimal) 
+
+PV of residual CF at base discount rate (currency) 
+
+ 
+
+Troubleshooting Notes 
+
+If schema mismatch occurs, return error message and stop execution. 
+
+If MCC mapping missing, default to "Unknown MCC". 
+
+If December residual missing, apply imputation logic and log in Residual_Dec_Estimates. 
+
+If action fails, retry tab creation and ensure workbook integrity. 
+
+ 
+
+Core SOP Sections 
+
+IO Contract: Inputs, outputs, Excel tabs. 
+
+Method: Data prep, monthly series, attrition, Shapley bridge, seasonality, MCC concentration, forecast, valuation, sensitivity, summary, charts. 
+
+Definitions: Non churn, non silent 1m, non silent 3m, active exclusions, residual display positive. 
+
+QA Checklist: Rebasing confirmed, drift applied monthly, matrix formatting and color scale, charts embedded, currency and percent formats. 
+
+Action Interface: Request and response JSON schema. 
+
+ 
+
+This SOP is now fully optimized for Copilot Studio orchestration. 
