@@ -1,0 +1,190 @@
+
+Portfolio Analysis SOP v2
+Author: Strategic Planning Team Last updated: 2026-01-09 Purpose: Deterministic, repeatable protocol for an agent to produce a full portfolio analysis workbook, 10-year monthly forecast, and residual-based valuation. Includes QA gates, error handling, and backend action schema.
+
+
+1. Inputs and Outputs
+1.1 Inputs
+Two CSV files with exact schemas: Portfolio CSV columns
+
+ISC Code As Is
+Customer Name
+Customer ID
+Month of Customer Open Date
+Month of Min Customer Close Date
+Measure Names
+Month of Process Month
+Measure Values
+MCC mapping CSV columns
+
+Customer ID
+Pricing MCC
+Pricing MCC Description
+Notes:
+
+Dates are month names like "December 2025". Close months containing "9999" mean still open.
+Measures include at least Net Rev Total, Net Vol Total, Net Residual. Residual in raw data is negative for amounts paid to partner.
+1.2 Required agent return values
+
+Workbook link or path
+Base YoY decline used in forecast
+Residual rate r used
+PV of residual cash flows at base discount rate
+1.3 Excel deliverables
+Tabs to create or replace:
+
+Revenue_Attrition_Closed
+Revenue_Attrition_Closed_Backup
+Silent_Attrition_1m
+Silent_Attrition_1m_Backup
+Silent_Attrition_3m
+Silent_Attrition_3m_Backup
+Revenue_Bridge_3m
+MCC_Breakdown
+Top_MCC_by_Revenue
+Top_MCC_by_Volume
+Seasonality_Rev
+Forecast_Params
+Forecast_120m
+Summary
+Valuation_Base_Residual
+Valuation_Sensitivity_Residual
+Valuation_Sensitivity_Matrix
+Charts
+
+
+2. Run Parameters and Defaults
+
+forecast_horizon_years: 10
+drift_per_year: -0.005
+yoy_lookback_months: 12
+topN_MCC: 10
+base_discount_rate_annual: 0.15
+sensitivity_discount_rates_annual: [0.10,0.11,0.12,0.13,0.14,0.15]
+sensitivity_yoy_offsets: [-0.025,-0.020,-0.015,-0.010,-0.005,0.0,0.005,0.010,0.015,0.020,0.025]
+include_unexplained_delta_in_driver: false
+residual_display_positive: true
+currency_format: $#,##0
+percent_format: 0.0%
+
+
+3. Data Preparation
+
+Validate input schemas. Fail gracefully if columns mismatch.
+Load both CSVs. Trim headers. Coerce Measure Values to numeric.
+Parse months: Month of Process Month → ProcessMonth (datetime first day of month)
+Month of Customer Open Date → OpenMonth
+Month of Min Customer Close Date → CloseMonth. If contains "9999", treat as NaT.
+Build merchant metadata: Columns: Customer ID, Customer Name, OpenMonth, CloseMonth, OpenEnd, CloseEnd
+Merge MCC attributes by Customer ID. If missing MCC, default to "Unknown MCC".
+Merchant-month matrix: Aggregate Net Rev Total, Net Vol Total, Net Residual per [Customer ID, ProcessMonth].
+December residual gap fill: residual_ratio_12m = abs(sum residual last 12 months) / sum revenue last 12 months
+December residual = - residual_ratio_12m × December revenue
+Log imputations in Residual_Dec_Estimates.
+
+
+4. Monthly Series
+Compute and store series indexed by ProcessMonth:
+
+Revenue = sum(Net Rev Total)
+Residual = sum(Net Residual)
+Volume = sum(Net Vol Total)
+Margin = Revenue + Residual (raw sign)
+
+
+5. Attrition and Silent Attrition
+For each month t vs base b = t - 12:
+
+Base cohort: merchants open at b.
+Closed attrition: churned merchants closed in (b, t].
+Silent attrition: merchants still open at t but inactive (1m or 3m). Output tabs:
+Revenue_Attrition_Closed (+ Backup)
+Silent_Attrition_1m (+ Backup)
+Silent_Attrition_3m (+ Backup)
+
+
+6. Revenue Bridge (Shapley, 3m variant)
+
+Survivors: open at b and still open at t, excluding silent 3m.
+Compute price and volume contributions per merchant.
+Bridge lines: Base Revenue, Lost Churn, Lost Silent, Organic Volume Change, Pricing Change, New Adds, Unexplained Delta.
+Output: Revenue_Bridge_3m with percent-of-base columns.
+
+
+7. Seasonality
+Compute Month-of-Year revenue seasonality index:
+
+Seasonality_Rev[month] = avg(revenue in month) / overall monthly mean.
+
+
+8. MCC Concentration
+Aggregate by Pricing MCC Description:
+
+Sum revenue, residual, margin, merchant count, shares.
+Output: MCC_Breakdown, Top_MCC_by_Revenue, Top_MCC_by_Volume.
+
+
+9. Forecast (10 years, monthly, rebased)
+
+Base YoY decline = avg of last yoy_lookback_months from 3m bridge components.
+Drift per month = drift_per_year / 12.
+Seasonality ratio = S_t / S_{t-12}.
+Residual rate r = abs(sum residual last 12 months) / sum revenue last 12 months.
+Formula: Revenue_t = Revenue_{t-12} × (1 + total_yoy_i) × S_ratio_t.
+Residual_t_display = r × Revenue_t. Output: Forecast_Params, Forecast_120m.
+
+
+10. Valuation
+
+Convert annual discount to monthly: r_m = (1 + r_annual)^(1/12) - 1.
+PV residual CF = sum Residual_t_display / (1 + r_m)^month_index. Output: Valuation_Base_Residual.
+
+
+11. Sensitivity Analysis
+
+Valuation_Sensitivity_Residual: long form table for discount rates and YoY offsets.
+Valuation_Sensitivity_Matrix: pivot with conditional color scale.
+
+
+12. Summary Tab
+Include:
+
+Latest Month
+Total Merchants
+Active Merchants excluding silent 1m and 3m
+12m averages for revenue and residual
+PV of residual CF at base discount rate.
+
+
+13. Charts Tab
+Embed charts:
+
+Net Revenue Forecast (line)
+Net Residual Forecast (line)
+Top MCC by Revenue (bar)
+Top MCC by Volume (bar)
+Attrition Rates (line)
+Stick Count Attrition (line)
+
+
+QA Checklist
+
+Rebasing confirmed beyond year 1.
+Drift applied monthly.
+Base YoY Decline equals last 12-month average.
+Residual rate r equals last 12-month average.
+Sensitivity matrix headers in percent, cells in currency.
+Charts embedded with correct titles and types.
+
+
+Error Handling
+
+Validate input schema.
+Default MCC to "Unknown MCC" if missing.
+Log imputations.
+Retry tab creation on failure.
+
+
+Action Interface
+Request JSON: { "portfolio_csv_path": "
+Response JSON: { "workbook_link": "", "base_yoy_decline": -0.173416, "residual_rate": 0.71665, "pv_residual_base": 2808123.88 }
