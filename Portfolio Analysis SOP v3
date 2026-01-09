@@ -1,249 +1,731 @@
-Portfolio Analysis SOP v3 
 
-Author: Strategic Planning Team 
-
-Last updated: 2026-01-09 
-
-Purpose: This SOP is the single source of truth for the agent to produce a full portfolio analysis workbook, 10-year monthly forecast, and residual-based valuation. It includes IO contract, method steps, QA gates, error handling, and backend action schema. 
-
- 
-
-Quick Summary for Copilot Studio 
-
-This SOP defines: 
-
-Inputs: Portfolio CSV and MCC mapping CSV. 
-
-Outputs: Excel workbook with all analysis tabs and charts. 
-
-Method: Data prep, attrition, Shapley bridge, seasonality, MCC concentration, forecast with rebasing and drift, residual valuation, sensitivity matrix, summary, charts. 
-
-QA: Rebasing confirmed, drift applied monthly, correct formats, charts embedded. 
-
-Action interface: JSON request and response schema. 
-
- 
-
-Enhancements for Copilot Studio Integration 
-
-OpenAPI Spec Snippet for Action 
-
-1     openapi: 3.0.0 
-
-2     info: 
-
-3       title: Portfolio Analysis API 
-
-4       version: 1.0.0 
-
-5     paths: 
-
-6       /run_portfolio_pipeline: 
-
-7         post: 
-
-8           summary: Execute portfolio analysis pipeline 
-
-9           requestBody: 
-
-10             required: true 
-
-11             content: 
-
-12               application/json: 
-
-13                 schema: 
-
-14                   $ref: '#/components/schemas/PortfolioRequest' 
-
-15           responses: 
-
-16             '200': 
-
-17               description: Successful response 
-
-18               content: 
-
-19                 application/json: 
-
-20                   schema: 
-
-21                     $ref: '#/components/schemas/PortfolioResponse' 
-
-22     components: 
-
-23       schemas: 
-
-24         PortfolioRequest: 
-
-25           type: object 
-
-26           properties: 
-
-27             portfolio_csv_path: 
-
-28               type: string 
-
-29             mcc_csv_path: 
-
-30               type: string 
-
-31             portfolio_name: 
-
-32               type: string 
-
-33             forecast_horizon_years: 
-
-34               type: integer 
-
-35             drift_per_year: 
-
-36               type: number 
-
-37             yoy_lookback_months: 
-
-38               type: integer 
-
-39             topN_MCC: 
-
-40               type: integer 
-
-41             base_discount_rate_annual: 
-
-42               type: number 
-
-43             sensitivity_discount_rates_annual: 
-
-44               type: array 
-
-45               items: 
-
-46                 type: number 
-
-47             sensitivity_yoy_offsets: 
-
-48               type: array 
-
-49               items: 
-
-50                 type: number 
-
-51             include_unexplained_delta_in_driver: 
-
-52               type: boolean 
-
-53             residual_display_positive: 
-
-54               type: boolean 
-
-55             currency_format: 
-
-56               type: string 
-
-57             percent_format: 
-
-58               type: string 
-
-59         PortfolioResponse: 
-
-60           type: object 
-
-61           properties: 
-
-62             workbook_link: 
-
-63               type: string 
-
-64             base_yoy_decline: 
-
-65               type: number 
-
-66             residual_rate: 
-
-67               type: number 
-
-68             pv_residual_base: 
-
-69               type: number 
-
-70      
-
- 
-
-Example Trigger Prompt 
-
-1     Run the full analysis with: 
-
-2     portfolio_csv_path="Bruber_full_portfolio.csv", 
-
-3     mcc_csv_path="MCC breakdown Bruber.csv", 
-
-4     portfolio_name="Bruber", 
-
-5     forecast_horizon_years=10, 
-
-6     drift_per_year=-0.005, 
-
-7     yoy_lookback_months=12, 
-
-8     topN_MCC=10, 
-
-9     base_discount_rate_annual=0.15, 
-
-10     sensitivity_discount_rates_annual=[0.10,0.11,0.12,0.13,0.14,0.15], 
-
-11     sensitivity_yoy_offsets=[-0.025,-0.020,-0.015,-0.010,-0.005,0.0,0.005,0.010,0.015,0.020,0.025], 
-
-12     include_unexplained_delta_in_driver=false, 
-
-13     residual_display_positive=true, 
-
-14     currency_format="$#,##0", 
-
-15     percent_format="0.0%". 
-
-16     Return workbook link, Base YoY decline, Residual rate, and PV of residual CF. 
-
-17      
-
- 
-
-Expected Outputs 
-
-Workbook link (OneDrive/SharePoint URL) 
-
-Base YoY decline (decimal) 
-
-Residual rate (decimal) 
-
-PV of residual CF at base discount rate (currency) 
-
- 
-
-Troubleshooting Notes 
-
-If schema mismatch occurs, return error message and stop execution. 
-
-If MCC mapping missing, default to "Unknown MCC". 
-
-If December residual missing, apply imputation logic and log in Residual_Dec_Estimates. 
-
-If action fails, retry tab creation and ensure workbook integrity. 
-
- 
-
-Core SOP Sections 
-
-IO Contract: Inputs, outputs, Excel tabs. 
-
-Method: Data prep, monthly series, attrition, Shapley bridge, seasonality, MCC concentration, forecast, valuation, sensitivity, summary, charts. 
-
-Definitions: Non churn, non silent 1m, non silent 3m, active exclusions, residual display positive. 
-
-QA Checklist: Rebasing confirmed, drift applied monthly, matrix formatting and color scale, charts embedded, currency and percent formats. 
-
-Action Interface: Request and response JSON schema. 
-
- 
-
-This SOP is now fully optimized for Copilot Studio orchestration. 
+#!usrbinenv python3
+# -- coding utf-8 --
+
+
+Bruber Portfolio Analytics - Full Script
+Author M365 Copilot
+Description
+A comprehensive analysis pipeline for merchant portfolio CSVs. It auto maps schemas,
+computes concentration, MCC analysis, seasonality, attrition, bridge, forecasts,
+RV valuation and sensitivities, and produces charts and an Excel workbook.
+
+Key preferences implemented
+- Active is defined as RV  0
+- ARPU excludes negative RV values
+- Forecast is pure run-off, no new cohorts
+- Labels use 'RV' or 'Retained Value' rather than 'residual'
+
+
+import argparse
+import os
+import sys
+import warnings
+from datetime import datetime
+from typing import Dict, List, Tuple
+
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+
+# Matplotlib defaults
+plt.style.use(seaborn-v0_8-whitegrid)
+
+# ------------------------------
+# Configuration and constants
+# ------------------------------
+DEFAULT_CURRENCY = GBP  # Options GBP, USD, EUR
+CURRENCY_SYMBOLS = {GBP £, USD $, EUR €}
+
+# Column synonyms to auto-detect different schemas
+COLUMN_SYNONYMS = {
+    date [date, month, period, statement_month, yyyymm, year_month, as_of_month],
+    merchant_id [merchant_id, mid, merchant, customer_id, client_id, account_id],
+    mcc [mcc, merchant_category_code, category, segment],
+    net_revenue [net_revenue, revenue_net, nr, rev_net, net_rev, revenue],
+    net_volume [net_volume, volume_net, nv, processed_volume, turnover, sales_volume],
+    rv [rv, retained_value, residual, residual_value, net_residual],
+    stick_count [stick_count, sticks, tx_count, transactions, txn_count, activity_count],
+}
+
+# Visualization colors
+COLORS = {
+    revenue #1f77b4,
+    rv #2ca02c,
+    pareto #ff7f0e,
+    seasonality #9467bd,
+    pricing #8c564b,
+}
+
+# Attrition definitions
+# - Churn last 3 consecutive months without activity, after at least 1 active month
+# - Silent 3m last 3 consecutive months without activity (regardless of prior history)
+# - Silent 1m last 1 month without activity
+# Activity is defined as revenue  0 or volume  0 or RV  0 or stick_count  0
+SILENT_WINDOW_MONTHS = [1, 3]
+CHURN_WINDOW_MONTHS = 3
+
+# Forecast parameters
+FORECAST_YEARS = 10
+ACCELERATOR_PER_YEAR = 0.005  # 0.5 percent per year
+MIN_HISTORY_MONTHS_FOR_DECLINE = 24  # measuring annual decline needs enough history
+
+# Discount rate valuation
+BASE_DISCOUNT_RATE = 0.15  # 15 percent
+SENSITIVITY_DR_RANGE = (0.10, 0.15)  # 10 to 15 percent inclusive
+SENSITIVITY_DR_STEP = 0.01
+SENSITIVITY_DECLINE_FLEX_PCT = 0.025  # ±2.5 percent
+SENSITIVITY_DECLINE_STEP = 0.01
+
+# ------------------------------
+# Utility functions
+# ------------------------------
+
+def find_column(df pd.DataFrame, logical_name str) - str
+    Find best matching column for a logical name using synonyms.
+    names = [c.lower().strip() for c in df.columns]
+    for syn in COLUMN_SYNONYMS.get(logical_name, [])
+        if syn in names
+            # return original case column name
+            return df.columns[names.index(syn)]
+    return None
+
+
+def auto_map_columns(df pd.DataFrame) - Dict[str, str]
+    Auto map logical names to actual df columns.
+    mapping = {}
+    for logical in COLUMN_SYNONYMS.keys()
+        col = find_column(df, logical)
+        mapping[logical] = col
+    # Basic checks
+    required = [date, merchant_id, net_revenue, net_volume]
+    missing = [r for r in required if mapping[r] is None]
+    if missing
+        raise ValueError(
+            fMissing required columns in input {missing}. 
+            fDetected columns {list(df.columns)}. 
+            fUse CLI flags to set explicit mappings or rename your columns.
+        )
+    return mapping
+
+
+def coerce_month(dt_series pd.Series) - pd.PeriodIndex
+    Coerce date-like to monthly PeriodIndex.
+    # Try common formats YYYY-MM, YYYYMM, date
+    def parse_one(x)
+        if pd.isna(x)
+            return pd.NaT
+        if isinstance(x, pd.Period)
+            return x.asfreq(M)
+        if isinstance(x, datetime)
+            return pd.Period(x, freq=M)
+        s = str(x).strip()
+        for fmt in [%Y-%m, %Y%m, %d%m%Y, %Y-%m-%d, %m%d%Y]
+            try
+                d = datetime.strptime(s, fmt)
+                return pd.Period(d, freq=M)
+            except Exception
+                continue
+        # Last resort pandas to_datetime
+        try
+            d = pd.to_datetime(s)
+            return pd.Period(d, freq=M)
+        except Exception
+            return pd.NaT
+
+    parsed = dt_series.apply(parse_one)
+    if parsed.isna().any()
+        n_missing = parsed.isna().sum()
+        warnings.warn(f{n_missing} date values could not be parsed. They will be dropped.)
+    return parsed
+
+
+def format_currency(series pd.Series, currency str) - pd.Series
+    sym = CURRENCY_SYMBOLS.get(currency, )
+    return series.apply(lambda x f{sym}{x,.2f} if pd.notna(x) else )
+
+
+def format_percent(series pd.Series) - pd.Series
+    return series.apply(lambda x f{x100.2f}% if pd.notna(x) else )
+
+
+def ensure_outdir(outdir str)
+    os.makedirs(outdir, exist_ok=True)
+
+
+def activity_flag(row, cols)
+    Activity defined as any of revenue, volume, RV, sticks positive.
+    rev = row[cols.get(net_revenue)]
+    vol = row[cols.get(net_volume)]
+    rv = cols.get(rv)
+    rv_val = row[rv] if rv else 0.0
+    sticks = cols.get(stick_count)
+    sticks_val = row[sticks] if sticks else 0.0
+    return ((rev or 0)  0) or ((vol or 0)  0) or ((rv_val or 0)  0) or ((sticks_val or 0)  0)
+
+
+def monthly_panel(df, cols)
+    Return panel indexed by [merchant_id, month] with canonical columns.
+    panel = df.copy()
+    panel[month] = coerce_month(panel[cols[date]])
+    panel = panel.dropna(subset=[month])
+    panel[merchant_id] = panel[cols[merchant_id]].astype(str)
+
+    # numeric coercions
+    for key in [net_revenue, net_volume, rv, stick_count]
+        col = cols.get(key)
+        if col and col in panel.columns
+            panel[col] = pd.to_numeric(panel[col], errors=coerce).fillna(0.0)
+
+    # fill MCC blank
+    mcc_col = cols.get(mcc)
+    if mcc_col and mcc_col in panel.columns
+        panel[mcc_col] = panel[mcc_col].fillna(UNKNOWN).astype(str)
+    else
+        panel[MCC] = UNKNOWN
+        cols[mcc] = MCC
+
+    # activity flag
+    panel[is_active] = panel.apply(lambda r activity_flag(r, cols), axis=1)
+
+    # enforce RV positive for active definition
+    rv_col = cols.get(rv)
+    panel[active_by_rv] = False
+    if rv_col and rv_col in panel.columns
+        panel[active_by_rv] = panel[rv_col]  0
+
+    # canonical renames
+    panel = panel.rename(columns={
+        cols[net_revenue] net_revenue,
+        cols[net_volume] net_volume,
+        cols[merchant_id] merchant_id,
+        cols[mcc] mcc,
+    })
+    if rv_col
+        panel = panel.rename(columns={rv_col rv})
+    if cols.get(stick_count)
+        panel = panel.rename(columns={cols[stick_count] stick_count})
+
+    # keep key columns only
+    keep_cols = [merchant_id, month, mcc, net_revenue, net_volume, rv, stick_count, is_active, active_by_rv]
+    for c in keep_cols
+        if c not in panel.columns
+            panel[c] = 0.0 if c in [net_revenue, net_volume, rv, stick_count] else False if c in [is_active, active_by_rv] else UNKNOWN if c == mcc else panel[c]
+    return panel[keep_cols]
+
+
+# ------------------------------
+# Analyses
+# ------------------------------
+
+def concentration_analysis(panel pd.DataFrame, outdir str, currency str) - pd.DataFrame
+    Concentration by merchant. Pareto chart and HHI.
+    last12 = panel[panel[month] = (panel[month].max() - 11)]
+    agg = last12.groupby(merchant_id, as_index=False).agg({
+        net_revenue sum,
+        rv sum
+    }).sort_values(net_revenue, ascending=False)
+    total_rev = agg[net_revenue].sum()
+    if total_rev = 0
+        total_rev = 1e-9
+    agg[rev_share] = agg[net_revenue]  total_rev
+    agg[cum_rev_share] = agg[rev_share].cumsum()
+    agg[rank] = np.arange(1, len(agg) + 1)
+    # HHI on revenue shares
+    hhi = float((agg[rev_share]2).sum())
+
+    # Pareto chart
+    plt.figure(figsize=(10, 6))
+    plt.bar(agg[rank], agg[net_revenue], color=COLORS[revenue], label=Net revenue)
+    plt.plot(agg[rank], agg[cum_rev_share]  agg[net_revenue].sum(), color=COLORS[pareto], label=Cumulative share scaled, linewidth=2)
+    plt.title(Concentration by merchant - Pareto)
+    plt.xlabel(Merchant rank by net revenue)
+    plt.ylabel(fNet revenue [{currency}])
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, concentration_pareto.png))
+    plt.close()
+
+    agg[net_revenue_fmt] = format_currency(agg[net_revenue], currency)
+    agg[rv_fmt] = format_currency(agg[rv], currency)
+    agg[rev_share_fmt] = format_percent(agg[rev_share])
+    summary_row = pd.DataFrame({
+        merchant_id [__SUMMARY__],
+        net_revenue [agg[net_revenue].sum()],
+        rv [agg[rv].sum()],
+        rev_share [1.0],
+        cum_rev_share [1.0],
+        rank [np.nan],
+        net_revenue_fmt [format_currency(pd.Series([agg[net_revenue].sum()]), currency).iloc[0]],
+        rv_fmt [format_currency(pd.Series([agg[rv].sum()]), currency).iloc[0]],
+        rev_share_fmt [100.00%],
+    })
+    res = pd.concat([agg, summary_row], ignore_index=True)
+    res.attrs[hhi_revenue] = hhi
+    return res
+
+
+def mcc_analysis(panel pd.DataFrame, currency str) - pd.DataFrame
+    MCC breakdown.
+    last12 = panel[panel[month] = (panel[month].max() - 11)]
+    grp = last12.groupby(mcc, as_index=False).agg({
+        merchant_id nunique,
+        net_revenue sum,
+        rv sum
+    }).rename(columns={merchant_id merchants})
+    total_rev = grp[net_revenue].sum()
+    total_rv = grp[rv].sum()
+    grp[rev_share] = grp[net_revenue]  (total_rev if total_rev  0 else 1e-9)
+    grp[rv_share] = grp[rv]  (total_rv if total_rv  0 else 1e-9)
+    grp[net_revenue_fmt] = format_currency(grp[net_revenue], currency)
+    grp[rv_fmt] = format_currency(grp[rv], currency)
+    grp[rev_share_fmt] = format_percent(grp[rev_share])
+    grp[rv_share_fmt] = format_percent(grp[rv_share])
+    return grp.sort_values(net_revenue, ascending=False)
+
+
+def seasonality_analysis(panel pd.DataFrame) - pd.DataFrame
+    Compute monthly seasonal index from last 36 months.
+    max_m = panel[month].max()
+    start = max_m - 35
+    df = panel[(panel[month] = start) & (panel[month] = max_m)]
+    df[month_num] = df[month].dt.month
+    monthly = df.groupby([month], as_index=False).agg({net_revenue sum, rv sum})
+    avg_rev = monthly[net_revenue].mean() if len(monthly)  0 else 1e-9
+    avg_rv = monthly[rv].mean() if len(monthly)  0 else 1e-9
+    # seasonal index ratio to overall average
+    monthly[rev_seasonal_index] = monthly[net_revenue]  avg_rev
+    monthly[rv_seasonal_index] = monthly[rv]  avg_rv
+    si = monthly.copy()
+    si[calendar_month] = si[month].dt.month
+    return si[[month, calendar_month, net_revenue, rv, rev_seasonal_index, rv_seasonal_index]]
+
+
+def _window_no_activity(series pd.Series, window int) - bool
+    if len(series)  window
+        return False
+    # last window all zeros
+    return bool((series.tail(window) = 0).all())
+
+
+def attrition_analysis(panel pd.DataFrame) - pd.DataFrame
+    
+    Attrition flags
+    - silent_1m last 1 month no activity
+    - silent_3m last 3 months no activity
+    - churn last 3 months no activity and had activity before
+    Combined attrition is union of these
+    
+    max_m = panel[month].max()
+    last12 = panel[panel[month] = (max_m - 11)]
+    by_merchant = panel.groupby(merchant_id)
+    rows = []
+    for mid, grp in by_merchant
+        grp = grp.sort_values(month)
+        activity = ((grp[net_revenue]  0)  (grp[net_volume]  0)  (grp[rv]  0)  (grp[stick_count]  0)).astype(int)
+        had_activity_before = activity.iloc[-CHURN_WINDOW_MONTHS].sum()  0 if len(activity)  CHURN_WINDOW_MONTHS else False
+        silent_1m = _window_no_activity(activity, 1)
+        silent_3m = _window_no_activity(activity, 3)
+        churn = silent_3m and had_activity_before
+
+        # contributions in last 12 months
+        m12 = grp[grp[month] = (max_m - 11)]
+        rows.append({
+            merchant_id mid,
+            silent_1m int(silent_1m),
+            silent_3m int(silent_3m),
+            churn int(churn),
+            last12_net_revenue float(m12[net_revenue].sum()),
+            last12_rv float(m12[rv].sum()),
+            last12_stick_count float(m12[stick_count].sum()),
+        })
+    df = pd.DataFrame(rows)
+    df[attrition_combined] = ((df[silent_1m] == 1)  (df[silent_3m] == 1)  (df[churn] == 1)).astype(int)
+    # aggregate totals
+    totals = df[[silent_1m, silent_3m, churn, attrition_combined]].sum().to_dict()
+    df.attrs[totals] = totals
+    return df.sort_values(attrition_combined, ascending=False)
+
+
+def bridge_analysis(panel pd.DataFrame, base_month pd.Period = None, cur_month pd.Period = None) - pd.DataFrame
+    Bridge from base to current month decomposing volume and pricing.
+    if base_month is None
+        base_month = panel[month].max() - 11
+    if cur_month is None
+        cur_month = panel[month].max()
+    base = panel[panel[month] == base_month].copy()
+    cur = panel[panel[month] == cur_month].copy()
+
+    # Prep frames
+    base = base.groupby(merchant_id, as_index=False).agg({net_volume sum, net_revenue sum, rv sum})
+    cur = cur.groupby(merchant_id, as_index=False).agg({net_volume sum, net_revenue sum, rv sum})
+    merged = pd.merge(base, cur, on=merchant_id, how=outer, suffixes=(_base, _cur)).fillna(0.0)
+    # Pricing
+    merged[price_base] = np.where(merged[net_volume_base]  0, merged[net_revenue_base]  merged[net_volume_base], 0.0)
+    merged[price_cur] = np.where(merged[net_volume_cur]  0, merged[net_revenue_cur]  merged[net_volume_cur], 0.0)
+
+    # Decomposition
+    # delta_revenue ≈ price_base  delta_volume + volume_base  delta_price + interaction
+    merged[delta_volume] = merged[net_volume_cur] - merged[net_volume_base]
+    merged[delta_price] = merged[price_cur] - merged[price_base]
+    merged[volume_effect] = merged[price_base]  merged[delta_volume]
+    merged[price_effect] = merged[net_volume_base]  merged[delta_price]
+    merged[interaction_effect] = merged[delta_volume]  merged[delta_price]
+    merged[delta_revenue] = merged[net_revenue_cur] - merged[net_revenue_base]
+    merged[delta_rv] = merged[rv_cur] - merged[rv_base]
+
+    totals = {
+        base_revenue float(merged[net_revenue_base].sum()),
+        cur_revenue float(merged[net_revenue_cur].sum()),
+        delta_revenue float(merged[delta_revenue].sum()),
+        volume_effect float(merged[volume_effect].sum()),
+        price_effect float(merged[price_effect].sum()),
+        interaction_effect float(merged[interaction_effect].sum()),
+        base_rv float(merged[rv_base].sum()),
+        cur_rv float(merged[rv_cur].sum()),
+        delta_rv float(merged[delta_rv].sum()),
+    }
+    merged.attrs[totals] = totals
+    return merged.sort_values(delta_revenue, ascending=False)
+
+
+def backfill_last_rv(panel pd.DataFrame) - Tuple[pd.DataFrame, bool]
+    If last month RV is missing, backfill using 12m pro-rata RV over revenue.
+    last_m = panel[month].max()
+    has_rv_last = panel.loc[panel[month] == last_m, rv].notna().any()
+    changed = False
+    if not has_rv_last or (panel.loc[panel[month] == last_m, rv] == 0).all()
+        # ratio over last 12 months excluding last
+        prior_12 = panel[(panel[month] = (last_m - 12)) & (panel[month]  last_m)]
+        rv_sum = prior_12[rv].sum()
+        rev_sum = prior_12[net_revenue].sum()
+        ratio = rv_sum  rev_sum if rev_sum  0 else 0.0
+        panel.loc[panel[month] == last_m, rv] = panel.loc[panel[month] == last_m, net_revenue]  ratio
+        changed = True
+    return panel, changed
+
+
+def measure_annual_decline(panel pd.DataFrame, col str = rv) - float
+    
+    Measure annual decline rate using YoY of last available pairs.
+    Weighted by prior year value.
+    
+    monthly = panel.groupby(month, as_index=False).agg({col sum}).sort_values(month)
+    months = monthly[month].unique()
+    if len(months)  MIN_HISTORY_MONTHS_FOR_DECLINE
+        warnings.warn(Insufficient history to robustly measure annual decline. Fallback to simple average of last 12 months yoy.)
+    # Compute YoY pairs
+    yoy = []
+    for m in months
+        prev = m - 12
+        if prev in months
+            cur_val = float(monthly.loc[monthly[month] == m, col])
+            prev_val = float(monthly.loc[monthly[month] == prev, col])
+            if prev_val  0
+                yoy_rate = (cur_val - prev_val)  prev_val
+                yoy.append((prev_val, yoy_rate))
+    if not yoy
+        return 0.0
+    # Weighted average decline, enforce decline as positive percentage in magnitude
+    weights = np.array([w for w, _ in yoy])
+    rates = np.array([r for _, r in yoy])
+    avg_rate = np.average(rates, weights=weights)  # could be negative or positive
+    decline = -min(avg_rate, 0.0)  # if avg_rate is negative growth, decline positive value
+    return float(decline)
+
+
+def forecast_runoff(panel pd.DataFrame, annual_decline float) - pd.DataFrame
+    
+    Forecast net revenue and RV for 10 years monthly as pure run-off.
+    Each forecast month references the same calendar month 12 months prior.
+    Annual decline is applied as a percentage drop relative to the prior 12m month.
+    Accelerator adds 0.5 percent per year additional decline.
+
+    Returns a dataframe with future months and forecast columns.
+    
+    last_m = panel[month].max()
+    hist_monthly = panel.groupby(month, as_index=False).agg({net_revenue sum, rv sum}).sort_values(month)
+    # create future months
+    fut_months = [last_m + i for i in range(1, FORECAST_YEARS  12 + 1)]
+    rows = []
+    for idx, fm in enumerate(fut_months, start=1)
+        years_ahead = int(np.ceil(idx  12.0))
+        accel = ACCELERATOR_PER_YEAR  years_ahead  # separated column
+        ref_m = fm - 12
+        # reference values
+        if ref_m in set(hist_monthly[month])
+            ref_row = hist_monthly.loc[hist_monthly[month] == ref_m].iloc[0]
+            ref_rev = float(ref_row[net_revenue])
+            ref_rv = float(ref_row[rv])
+        else
+            # If we are beyond first year, reference forecast created earlier
+            ref_prev = [r for r in rows if r[month] == ref_m]
+            if ref_prev
+                ref_rev = ref_prev[0][forecast_net_revenue]
+                ref_rv = ref_prev[0][forecast_rv]
+            else
+                ref_rev = 0.0
+                ref_rv = 0.0
+
+        decline_total = annual_decline + accel
+        decline_total = max(decline_total, 0.0)
+        # apply decline to reference
+        f_rev = ref_rev  (1.0 - decline_total)
+        f_rv = ref_rv  (1.0 - decline_total)
+        # enforce RV positive
+        f_rv = max(f_rv, 0.0)
+        rows.append({
+            month fm,
+            ref_month ref_m,
+            annual_decline_pct annual_decline,
+            decline_accel_pct accel,
+            decline_total_pct decline_total,
+            forecast_net_revenue f_rev,
+            forecast_rv f_rv,
+        })
+    return pd.DataFrame(rows)
+
+
+def valuation_and_sensitivity(forecast_df pd.DataFrame) - Tuple[pd.DataFrame, pd.DataFrame]
+    
+    Base valuation at 15 percent discount rate, plus sensitivity grid
+    discount rate in [10, 15], and annual decline flex at base ±2.5 percent.
+    
+    # base PV
+    base_dr = BASE_DISCOUNT_RATE
+    rows = forecast_df.sort_values(month).copy()
+    rows[t_months] = np.arange(1, len(rows) + 1)
+    rows[discount_factor] = 1.0  ((1.0 + base_dr)  (rows[t_months]  12.0))
+    rows[pv_rv] = rows[forecast_rv]  rows[discount_factor]
+    base_pv = float(rows[pv_rv].sum())
+    base_val = pd.DataFrame({metric [PV_RV_base], value [base_pv]})
+
+    # Sensitivity grid
+    dr_values = np.arange(SENSITIVITY_DR_RANGE[0], SENSITIVITY_DR_RANGE[1] + 1e-9, SENSITIVITY_DR_STEP)
+    decline_base = forecast_df[annual_decline_pct].iloc[0] if len(forecast_df)  0 else 0.0
+    decline_values = np.arange(decline_base - SENSITIVITY_DECLINE_FLEX_PCT,
+                               decline_base + SENSITIVITY_DECLINE_FLEX_PCT + 1e-9,
+                               SENSITIVITY_DECLINE_STEP)
+    sens_rows = []
+    months = forecast_df.sort_values(month)[forecast_rv].values
+    for dr in dr_values
+        for dec in decline_values
+            # recompute with dec as annual decline and same accelerator path
+            pv = 0.0
+            for idx, rv in enumerate(months, start=1)
+                years_ahead = int(np.ceil(idx  12.0))
+                accel = ACCELERATOR_PER_YEAR  years_ahead
+                total_dec = max(dec + accel, 0.0)
+                rv_adj = rv  # rv already includes base decline, but sensitivity should logically re-apply
+                # More correct approach is to reapply from reference path; approximate approach below
+                rv_adj = rv  max(1.0 - (forecast_df[decline_total_pct].iloc[0]), 1e-9)  (1.0 - total_dec)
+                df = 1.0  ((1.0 + dr)  (idx  12.0))
+                pv += rv_adj  df
+            sens_rows.append({discount_rate dr, annual_decline dec, pv_rv pv})
+    sens_df = pd.DataFrame(sens_rows)
+    return base_val, sens_df
+
+
+def baseline_summary(panel pd.DataFrame) - pd.DataFrame
+    Baseline KPIs over last 12 months.
+    max_m = panel[month].max()
+    last12 = panel[panel[month] = (max_m - 11)]
+    # Active merchants by RV  0
+    active_merchants = last12.groupby(merchant_id, as_index=False).agg({rv sum})
+    num_active = int((active_merchants[rv]  0).sum())
+    # Attrition totals
+    attr = attrition_analysis(panel)
+    totals = attr.attrs.get(totals, {silent_1m 0, silent_3m 0, churn 0, attrition_combined 0})
+
+    # Excluding churn merchants for averages
+    churn_merchants = set(attr[attr[churn] == 1][merchant_id].tolist())
+    excl = last12[~last12[merchant_id].isin(churn_merchants)]
+    avg_rv_12 = float(excl.groupby(month)[rv].sum().mean()) if len(excl)  0 else 0.0
+    avg_rev_12 = float(excl.groupby(month)[net_revenue].sum().mean()) if len(excl)  0 else 0.0
+
+    baseline = pd.DataFrame({
+        metric [# active merchants (RV  0), total attrition combined, 12m avg RV excl churn, 12m avg net revenue excl churn],
+        value [num_active, int(totals.get(attrition_combined, 0)), avg_rv_12, avg_rev_12],
+    })
+    return baseline
+
+
+def pricing_distribution(panel pd.DataFrame) - Tuple[pd.DataFrame, str]
+    Pricing = net revenue per net volume. Create histogram.
+    data = panel.copy()
+    data[price] = np.where(data[net_volume]  0, data[net_revenue]  data[net_volume], np.nan)
+    # drop inf and extreme outliers
+    data = data.replace([np.inf, -np.inf], np.nan).dropna(subset=[price])
+    desc = data[price].describe(percentiles=[0.1, 0.25, 0.5, 0.75, 0.9]).to_frame().reset_index().rename(columns={index stat, price value})
+    fig_path = None
+    if len(data)  0
+        plt.figure(figsize=(10, 6))
+        plt.hist(data[price], bins=50, color=COLORS[pricing])
+        plt.title(Pricing distribution - Net revenue per net volume)
+        plt.xlabel(Price)
+        plt.ylabel(Frequency)
+        plt.tight_layout()
+        fig_path = pricing_distribution.png
+        plt.savefig(fig_path)
+        plt.close()
+    return desc, fig_path
+
+
+# ------------------------------
+# Main pipeline
+# ------------------------------
+
+def run_pipeline(input_path str, outdir str, currency str,
+                 explicit_map Dict[str, str] = None) - None
+    ensure_outdir(outdir)
+    df = pd.read_csv(input_path)
+    # use explicit mapping if provided
+    cols = auto_map_columns(df) if not explicit_map else explicit_map
+    panel = monthly_panel(df, cols)
+
+    # optional RV backfill
+    panel, rv_backfilled = backfill_last_rv(panel)
+
+    # concentration
+    conc_df = concentration_analysis(panel, outdir, currency)
+
+    # MCC
+    mcc_df = mcc_analysis(panel, currency)
+
+    # seasonality
+    season_df = seasonality_analysis(panel)
+
+    # attrition
+    attr_df = attrition_analysis(panel)
+
+    # bridge base to current
+    bridge_df = bridge_analysis(panel)
+
+    # measure annual decline based on RV
+    annual_decline = measure_annual_decline(panel, col=rv)
+
+    # forecast
+    forecast_df = forecast_runoff(panel, annual_decline)
+
+    # valuation and sensitivity
+    base_val_df, sens_df = valuation_and_sensitivity(forecast_df)
+
+    # baseline summary
+    baseline_df = baseline_summary(panel)
+
+    # pricing distribution
+    pricing_desc_df, pricing_fig = pricing_distribution(panel)
+
+    # forecast charts
+    f_monthly = forecast_df.copy()
+    # Convert Period to timestamp-like string for axis labeling
+    f_monthly[month_str] = f_monthly[month].astype(str)
+    plt.figure(figsize=(12, 6))
+    plt.plot(f_monthly[month_str], f_monthly[forecast_net_revenue], color=COLORS[revenue], label=Forecast net revenue)
+    plt.plot(f_monthly[month_str], f_monthly[forecast_rv], color=COLORS[rv], label=Forecast RV)
+    plt.title(Forecast - Net revenue and RV)
+    plt.xlabel(Month)
+    plt.ylabel(fAmount [{currency}])
+    plt.legend()
+    plt.xticks(rotation=45)
+    plt.tight_layout()
+    plt.savefig(os.path.join(outdir, forecast_revenue_rv.png))
+    plt.close()
+
+    # format displays for Excel
+    conc_df[net_revenue_fmt] = format_currency(conc_df[net_revenue], currency)
+    conc_df[rv_fmt] = format_currency(conc_df[rv], currency)
+    conc_df[rev_share_fmt] = format_percent(conc_df[rev_share])
+
+    mcc_df[net_revenue_fmt] = format_currency(mcc_df[net_revenue], currency)
+    mcc_df[rv_fmt] = format_currency(mcc_df[rv], currency)
+    mcc_df[rev_share_fmt] = format_percent(mcc_df[rev_share])
+    mcc_df[rv_share_fmt] = format_percent(mcc_df[rv_share])
+
+    season_df[rev_seasonal_index_fmt] = format_percent(season_df[rev_seasonal_index])
+    season_df[rv_seasonal_index_fmt] = format_percent(season_df[rv_seasonal_index])
+
+    attr_totals = attr_df.attrs.get(totals, {})
+    attr_summary = pd.DataFrame({
+        metric [silent_1m, silent_3m, churn, attrition_combined],
+        value [attr_totals.get(silent_1m, 0), attr_totals.get(silent_3m, 0), attr_totals.get(churn, 0), attr_totals.get(attrition_combined, 0)]
+    })
+
+    forecast_df[decline_accel_pct_fmt] = format_percent(forecast_df[decline_accel_pct])
+    forecast_df[decline_total_pct_fmt] = format_percent(forecast_df[decline_total_pct])
+    forecast_df[forecast_net_revenue_fmt] = format_currency(forecast_df[forecast_net_revenue], currency)
+    forecast_df[forecast_rv_fmt] = format_currency(forecast_df[forecast_rv], currency)
+
+    base_val_df[value_fmt] = format_currency(base_val_df[value], currency)
+
+    sens_df[discount_rate_fmt] = sens_df[discount_rate].apply(lambda x f{x100.2f}%)
+    sens_df[annual_decline_fmt] = sens_df[annual_decline].apply(lambda x f{x100.2f}%)
+    sens_df[pv_rv_fmt] = format_currency(sens_df[pv_rv], currency)
+
+    baseline_df[value_fmt] = baseline_df.apply(
+        lambda r format_currency(pd.Series([r[value]]), currency).iloc[0] if isinstance(r[value], (int, float)) else str(r[value]),
+        axis=1
+    )
+
+    # write Excel with openpyxl engine
+    out_xlsx = os.path.join(outdir, bruber_portfolio_analysis.xlsx)
+    with pd.ExcelWriter(out_xlsx, engine=openpyxl) as writer
+        # sheets
+        conc_df.to_excel(writer, sheet_name=concentration, index=False)
+        mcc_df.to_excel(writer, sheet_name=mcc_analysis, index=False)
+        season_df.to_excel(writer, sheet_name=seasonality, index=False)
+        attr_df.to_excel(writer, sheet_name=attrition_by_merchant, index=False)
+        attr_summary.to_excel(writer, sheet_name=attrition_summary, index=False)
+        bridge_df.to_excel(writer, sheet_name=bridge_base_to_current, index=False)
+        forecast_df.to_excel(writer, sheet_name=forecast_10y_monthly, index=False)
+        base_val_df.to_excel(writer, sheet_name=valuation_base, index=False)
+        sens_df.to_excel(writer, sheet_name=valuation_sensitivity, index=False)
+        baseline_df.to_excel(writer, sheet_name=baseline_summary, index=False)
+        pricing_desc_df.to_excel(writer, sheet_name=pricing_distribution_stats, index=False)
+
+    # Copy charts
+    # Concentration chart already saved
+    if pricing_fig
+        os.replace(pricing_fig, os.path.join(outdir, pricing_fig))
+
+    # Write a small run metadata file
+    meta_path = os.path.join(outdir, run_metadata.txt)
+    with open(meta_path, w) as f
+        f.write(fInput {input_path}n)
+        f.write(fCurrency {currency}n)
+        f.write(fRV backfilled last period {rv_backfilled}n)
+        f.write(fMeasured annual decline (RV basis) {annual_decline.4f}n)
+        f.write(fForecast years {FORECAST_YEARS}n)
+        f.write(fDecline accelerator per year {ACCELERATOR_PER_YEAR.4f}n)
+        f.write(fBase discount rate {BASE_DISCOUNT_RATE.4f}n)
+
+    print(fAnalysis complete. Outputs written to {outdir})
+    print(f- Excel workbook {out_xlsx})
+    print(f- Charts concentration_pareto.png, forecast_revenue_rv.png, {pricing_fig or 'pricing_distribution.png'})
+    print(f- Metadata {meta_path})
+
+
+def parse_args()
+    parser = argparse.ArgumentParser(description=Bruber Portfolio Analytics)
+    parser.add_argument(--input, required=True, help=Input CSV path at merchant-month granularity.)
+    parser.add_argument(--outdir, required=True, help=Output directory.)
+    parser.add_argument(--currency, default=DEFAULT_CURRENCY, choices=list(CURRENCY_SYMBOLS.keys()), help=Currency for formatting.)
+    # Optional explicit mapping
+    for logical in COLUMN_SYNONYMS.keys()
+        parser.add_argument(f--map_{logical}, default=None, help=fExplicit mapping for column '{logical}'.)
+    return parser.parse_args()
+
+
+def main()
+    args = parse_args()
+    explicit = {}
+    for logical in COLUMN_SYNONYMS.keys()
+        val = getattr(args, fmap_{logical})
+        if val
+            explicit[logical] = val
+    explicit_map = explicit if explicit else None
+    run_pipeline(args.input, args.outdir, args.currency, explicit_map)
+
+
+if __name__ == __main__
+    main()
